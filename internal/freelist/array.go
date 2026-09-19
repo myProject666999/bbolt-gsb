@@ -19,6 +19,10 @@ func (f *array) Init(ids common.Pgids) {
 }
 
 func (f *array) Allocate(txid common.Txid, n int) common.Pgid {
+	return f.AllocateInRange(txid, n, common.Pgid(^uint64(0)))
+}
+
+func (f *array) AllocateInRange(txid common.Txid, n int, maxStart common.Pgid) common.Pgid {
 	if len(f.ids) == 0 {
 		return 0
 	}
@@ -31,6 +35,10 @@ func (f *array) Allocate(txid common.Txid, n int) common.Pgid {
 
 		// Reset initial page if this is not contiguous.
 		if previd == 0 || id-previd != 1 {
+			if id > maxStart {
+				// f.ids is sorted, so no later span can fit either.
+				return 0
+			}
 			initial = id
 		}
 
@@ -58,6 +66,49 @@ func (f *array) Allocate(txid common.Txid, n int) common.Pgid {
 		previd = id
 	}
 	return 0
+}
+
+// RemoveFreeIDs removes the given page ids from the free page list. The ids
+// must be sorted, strictly increasing and all of them must currently be free.
+func (f *array) RemoveFreeIDs(ids common.Pgids) {
+	if len(ids) == 0 {
+		return
+	}
+	sort.Sort(ids)
+
+	out := f.ids[:0]
+	next := 0
+	for _, id := range f.ids {
+		if next < len(ids) && id == ids[next] {
+			delete(f.cache, id)
+			next++
+			continue
+		}
+		out = append(out, id)
+	}
+	if next != len(ids) {
+		panic(fmt.Sprintf("RemoveFreeIDs: page %d is not free", ids[next]))
+	}
+	f.ids = out
+}
+
+func (f *array) TakeFreeSpan(txid common.Txid, start common.Pgid, n int) bool {
+	idx := sort.Search(len(f.ids), func(i int) bool { return f.ids[i] >= start })
+	if idx+n > len(f.ids) {
+		return false
+	}
+	for i := 0; i < n; i++ {
+		if f.ids[idx+i] != start+common.Pgid(i) {
+			return false
+		}
+	}
+
+	f.ids = append(f.ids[:idx], f.ids[idx+n:]...)
+	for i := 0; i < n; i++ {
+		delete(f.cache, start+common.Pgid(i))
+	}
+	f.allocs[start] = txid
+	return true
 }
 
 func (f *array) FreeCount() int {

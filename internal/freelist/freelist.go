@@ -27,6 +27,30 @@ type Interface interface {
 	// available; otherwise, it returns 0.
 	Allocate(txid common.Txid, numPages int) common.Pgid
 
+	// AllocateInRange behaves like Allocate, but the starting page id of the
+	// allocated span must not exceed maxStart. It returns 0 if no contiguous
+	// free span of numPages pages exists within the range.
+	AllocateInRange(txid common.Txid, numPages int, maxStart common.Pgid) common.Pgid
+
+	// FreePageIDs returns all currently available (released, not pending)
+	// free page ids in ascending order.
+	FreePageIDs() common.Pgids
+
+	// RemoveFreeIDs removes the given page ids from the set of currently
+	// available free pages. The ids must belong to existing free spans; the
+	// remaining parts of partially removed spans are kept as free spans.
+	RemoveFreeIDs(ids common.Pgids)
+
+	// PendingPageIDs returns all page ids which are pending release, i.e.
+	// freed by a previous writer but still potentially in use by an open
+	// read-only transaction.
+	PendingPageIDs() common.Pgids
+
+	// TakeFreeSpan removes the exact contiguous span [start, start+n) from
+	// the available free pages and records it as allocated by txid. It returns
+	// false if the span is not currently fully free.
+	TakeFreeSpan(txid common.Txid, start common.Pgid, n int) bool
+
 	// Count returns the number of free and pending pages.
 	Count() int
 

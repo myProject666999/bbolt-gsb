@@ -36,6 +36,21 @@ func (t *shared) pendingPageIds() map[common.Txid]*txPending {
 	return t.pending
 }
 
+// FreePageIDs returns all currently available free page ids in ascending order.
+func (t *shared) FreePageIDs() common.Pgids {
+	return t.freePageIds()
+}
+
+// PendingPageIDs returns all pending page ids in ascending order.
+func (t *shared) PendingPageIDs() common.Pgids {
+	m := make(common.Pgids, 0, t.PendingCount())
+	for _, txp := range t.pending {
+		m = append(m, txp.ids...)
+	}
+	sort.Sort(m)
+	return m
+}
+
 func (t *shared) PendingCount() int {
 	var count int
 	for _, txp := range t.pending {

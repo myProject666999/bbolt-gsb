@@ -31,6 +31,12 @@ func (b *InBucket) SetRootPage(id Pgid) {
 	b.root = id
 }
 
+// RootPageRef returns a pointer to the bucket's root page id, so callers can
+// atomically update it.
+func (b *InBucket) RootPageRef() *Pgid {
+	return &b.root
+}
+
 // InSequence returns the sequence. The reason why not naming it `Sequence`
 // is to avoid duplicated name as `(*Bucket) Sequence()`
 func (b *InBucket) InSequence() uint64 {

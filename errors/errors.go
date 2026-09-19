@@ -84,4 +84,13 @@ var (
 	// ErrDifferentDB is returned when trying to move a sub-bucket between
 	// source and target buckets, while source and target buckets are in different database files.
 	ErrDifferentDB = errors.New("the source and target buckets are in different database files")
+
+	// ErrOnlineCompactNoSpace is returned by an online compaction batch when
+	// the freelist cannot provide a planned destination span. It indicates an
+	// internal planning error and should not occur on a consistent database.
+	ErrOnlineCompactNoSpace = errors.New("online compaction: no free space available at planned location")
+
+	// ErrOnlineCompactShrinkBlocked is returned when the data file cannot be
+	// shrunk because open read-only transactions still pin pages in the tail.
+	ErrOnlineCompactShrinkBlocked = errors.New("online compaction: shrink blocked by active read-only transactions")
 )

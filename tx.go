@@ -34,6 +34,15 @@ type Tx struct {
 	stats          TxStats
 	commitHandlers []func()
 
+	// freelistAllocLimit, when non-zero, constrains the starting page id of
+	// the freelist span allocated by commitFreelist so that the whole span
+	// (including overflow pages) lands below the limit. Used by online
+	// compaction's shrink transaction.
+	freelistAllocLimit common.Pgid
+	// freelistAllocStart, when non-zero together with freelistAllocLimit,
+	// pins the freelist allocation to an exact starting page id.
+	freelistAllocStart common.Pgid
+
 	// WriteFlag specifies the flag for write-related methods like WriteTo().
 	// Tx opens the database file with the specified flag to copy the data.
 	//
@@ -285,7 +294,29 @@ func (tx *Tx) Commit() (err error) {
 func (tx *Tx) commitFreelist() error {
 	// Allocate new pages for the new free list. This will overestimate
 	// the size of the freelist but not underestimate the size (which would be bad).
-	p, err := tx.allocate((tx.db.freelist.EstimatedWritePageSize() / tx.db.pageSize) + 1)
+	numPages := (tx.db.freelist.EstimatedWritePageSize() / tx.db.pageSize) + 1
+	var (
+		p   *common.Page
+		err error
+	)
+	if tx.freelistAllocLimit != 0 {
+		start := tx.freelistAllocStart
+		if start == 0 {
+			start = tx.db.freelist.AllocateInRange(
+				tx.meta.Txid(), numPages, tx.freelistAllocLimit-common.Pgid(numPages),
+			)
+			if start == 0 {
+				return berrors.ErrOnlineCompactNoSpace
+			}
+		}
+		if err = tx.allocateAt(numPages, start); err != nil {
+			tx.rollback()
+			return err
+		}
+		p = tx.pages[start]
+	} else {
+		p, err = tx.allocate(numPages)
+	}
 	if err != nil {
 		tx.rollback()
 		return err

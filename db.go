@@ -456,6 +456,12 @@ func (db *DB) fileSize() (int, error) {
 func (db *DB) mmap(minsz int) (err error) {
 	db.mmaplock.Lock()
 	defer db.mmaplock.Unlock()
+	return db.remapLocked(minsz)
+}
+
+// remapLocked re-establishes the memory mapping; the caller must already hold
+// db.mmaplock for writing.
+func (db *DB) remapLocked(minsz int) (err error) {
 
 	lg := db.Logger()
 
@@ -1268,6 +1274,82 @@ func (db *DB) growSize(mmapSize, growSize int) int {
 	} else {
 		return growSize + db.AllocSize
 	}
+}
+
+// shrinkFile truncates the data file to size bytes and re-establishes the
+// memory mapping at the new size.
+//
+// It must be called only after a metadata commit whose high water mark and
+// freelist are fully contained within size bytes, so that a crash between the
+// commit and this call only leaves a file larger than required.
+//
+// Existing read-only transactions hold a read lock on mmaplock for the whole
+// lifetime of the transaction (their snapshots reference the old mapping).
+// The remap therefore waits, up to shrinkTimeout, for those transactions to
+// finish; this is the same guarantee that growth-time remaps rely on. A
+// negative timeout disables waiting and performs the remap immediately.
+func (db *DB) shrinkFile(size int64, shrinkTimeout time.Duration) error {
+	if size <= 0 {
+		return fmt.Errorf("invalid shrink size: %d", size)
+	}
+
+	// Wait (bounded) for active readers to release the old mapping.
+	if shrinkTimeout >= 0 {
+		deadline := time.Now().Add(shrinkTimeout)
+		for {
+			if db.mmaplock.TryLock() {
+				break
+			}
+			if time.Now().After(deadline) {
+				return berrors.ErrOnlineCompactShrinkBlocked
+			}
+			time.Sleep(flockRetryTimeout)
+		}
+	} else {
+		db.mmaplock.Lock()
+	}
+	defer db.mmaplock.Unlock()
+
+	fileSize, err := db.fileSize()
+	if err != nil {
+		return err
+	}
+	if int64(fileSize) <= size {
+		return nil
+	}
+
+	// gofail: var shrinkFileError string
+	// return errors.New(shrinkFileError)
+
+	if runtime.GOOS == "windows" {
+		// On Windows the platform mmap() re-creates the file at the rounded
+		// mapping size, so remapping would immediately undo the truncation.
+		// Truncate in place and keep the existing (strictly larger) mapping;
+		// subsequent growth/remap rounds the size back up as usual.
+		if err := db.file.Truncate(size); err != nil {
+			return fmt.Errorf("file shrink error: %w", err)
+		}
+		if err := db.file.Sync(); err != nil {
+			return fmt.Errorf("file sync after shrink error: %w", err)
+		}
+		return nil
+	}
+
+	if err := db.file.Truncate(size); err != nil {
+		return fmt.Errorf("file shrink error: %w", err)
+	}
+	if err := db.file.Sync(); err != nil {
+		return fmt.Errorf("file sync after shrink error: %w", err)
+	}
+
+	// gofail: var shrinkBeforeRemap struct{}
+
+	// Re-map at the current file size. Reuse the current write lock.
+	if err := db.remapLocked(int(size)); err != nil {
+		return fmt.Errorf("mmap after shrink error: %w", err)
+	}
+
+	return nil
 }
 
 func (db *DB) IsReadOnly() bool {

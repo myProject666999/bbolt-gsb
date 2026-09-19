@@ -2,6 +2,7 @@ package freelist
 
 import (
 	"fmt"
+	"math"
 	"reflect"
 	"sort"
 
@@ -59,50 +60,127 @@ func (f *hashMap) Init(pgids common.Pgids) {
 }
 
 func (f *hashMap) Allocate(txid common.Txid, n int) common.Pgid {
+	return f.AllocateInRange(txid, n, common.Pgid(math.MaxUint64))
+}
+
+func (f *hashMap) AllocateInRange(txid common.Txid, n int, maxStart common.Pgid) common.Pgid {
 	if n == 0 {
 		return 0
 	}
 
-	// if we have a exact size match just return short path
-	if bm, ok := f.freemaps[uint64(n)]; ok {
-		for pid := range bm {
-			// remove the span
-			f.delSpan(pid, uint64(n))
-
-			f.allocs[pid] = txid
-
-			for i := common.Pgid(0); i < common.Pgid(n); i++ {
-				delete(f.cache, pid+i)
-			}
-			return pid
-		}
-	}
-
-	// lookup the map to find larger span
-	for size, bm := range f.freemaps {
-		if size < uint64(n) {
+	// Deterministic allocation: among all free spans that are large enough and
+	// whose starting page id does not exceed maxStart, use the one with the
+	// smallest starting page id.
+	var pid common.Pgid
+	var size uint64
+	var found bool
+	for start, spanSize := range f.forwardMap {
+		if spanSize < uint64(n) || start > maxStart {
 			continue
 		}
-
-		for pid := range bm {
-			// remove the initial
-			f.delSpan(pid, size)
-
-			f.allocs[pid] = txid
-
-			remain := size - uint64(n)
-
-			// add remain span
-			f.addSpan(pid+common.Pgid(n), remain)
-
-			for i := common.Pgid(0); i < common.Pgid(n); i++ {
-				delete(f.cache, pid+i)
-			}
-			return pid
+		if !found || start < pid {
+			pid = start
+			size = spanSize
+			found = true
 		}
 	}
+	if !found {
+		return 0
+	}
 
-	return 0
+	f.delSpan(pid, size)
+
+	f.allocs[pid] = txid
+
+	if remain := size - uint64(n); remain > 0 {
+		f.addSpan(pid+common.Pgid(n), remain)
+	}
+
+	for i := common.Pgid(0); i < common.Pgid(n); i++ {
+		delete(f.cache, pid+i)
+	}
+	return pid
+}
+
+// RemoveFreeIDs removes the given page ids from the free spans. The ids must
+// be sorted and all of them must currently be free. Removing a sub-range of a
+// span keeps the remaining prefix and suffix as separate free spans.
+func (f *hashMap) RemoveFreeIDs(ids common.Pgids) {
+	if len(ids) == 0 {
+		return
+	}
+	sort.Sort(ids)
+
+	for i := 0; i < len(ids); i++ {
+		id := ids[i]
+		if i > 0 && id <= ids[i-1] {
+			panic(fmt.Sprintf("RemoveFreeIDs: ids must be strictly increasing: %d after %d", id, ids[i-1]))
+		}
+
+		spanStart, spanSize, ok := f.findContainingSpan(id)
+		if !ok {
+			panic(fmt.Sprintf("RemoveFreeIDs: page %d is not free", id))
+		}
+
+		// Find the end of the contiguous removed run within this span.
+		runEnd := id
+		for runEnd < spanStart+common.Pgid(spanSize)-1 {
+			if i+1 >= len(ids) || ids[i+1] != runEnd+1 {
+				break
+			}
+			i++
+			runEnd++
+		}
+
+		f.delSpan(spanStart, spanSize)
+		prefixLen := uint64(id - spanStart)
+		suffixStart := runEnd + 1
+		suffixLen := uint64(spanStart + common.Pgid(spanSize) - 1 - runEnd)
+		if prefixLen > 0 {
+			f.addSpan(spanStart, prefixLen)
+		}
+		if suffixLen > 0 {
+			f.addSpan(suffixStart, suffixLen)
+		}
+	}
+}
+
+// findContainingSpan returns the size and starting page id of the free span
+// containing the given page id.
+func (f *hashMap) findContainingSpan(id common.Pgid) (start common.Pgid, size uint64, ok bool) {
+	for s, spanSize := range f.forwardMap {
+		if id >= s && id < s+common.Pgid(spanSize) {
+			return s, spanSize, true
+		}
+	}
+	return 0, 0, false
+}
+
+func (f *hashMap) TakeFreeSpan(txid common.Txid, start common.Pgid, n int) bool {
+	spanStart, spanSize, ok := f.findContainingSpan(start)
+	if !ok {
+		return false
+	}
+	end := start + common.Pgid(n)
+	if end > spanStart+common.Pgid(spanSize) {
+		return false
+	}
+
+	f.delSpan(spanStart, spanSize)
+	prefixLen := uint64(start - spanStart)
+	suffixStart := start + common.Pgid(n)
+	suffixLen := uint64(spanStart + common.Pgid(spanSize) - suffixStart)
+	if prefixLen > 0 {
+		f.addSpan(spanStart, prefixLen)
+	}
+	if suffixLen > 0 {
+		f.addSpan(suffixStart, suffixLen)
+	}
+	f.allocs[start] = txid
+	for i := common.Pgid(0); i < common.Pgid(n); i++ {
+		delete(f.cache, start+i)
+	}
+	return true
 }
 
 func (f *hashMap) FreeCount() int {
