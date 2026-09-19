@@ -867,6 +867,12 @@ func (db *DB) beginRWTx() (*Tx, error) {
 	t := &Tx{writable: true}
 	t.init(db)
 	db.rwtx = t
+	// beginTx registers *every* new transaction id in the freelist's
+	// read-only tracking, but the first ever read-write transaction reuses
+	// the id reserved during database initialization. Remove it so the
+	// read-only list reflects only actual read transactions (online
+	// compaction relies on the list to know when it is safe to shrink).
+	db.freelist.RemoveReadonlyTXID(t.meta.Txid())
 	db.freelist.ReleasePendingPages()
 	return t, nil
 }
@@ -1173,10 +1179,22 @@ func (db *DB) allocate(txid common.Txid, count int) (*common.Page, error) {
 	p := (*common.Page)(unsafe.Pointer(&buf[0]))
 	p.SetOverflow(uint32(count - 1))
 
-	// Use pages from the freelist if they are available.
-	p.SetId(db.freelist.Allocate(txid, count))
+	// Use pages from the freelist if they are available. Online incremental
+	// compaction relocation transactions are restricted to pages strictly
+	// below compactAllocLimit so moved pages only drift toward the file head.
+	if db.rwtx != nil && db.rwtx.compactAllocLimit != 0 {
+		p.SetId(db.freelist.AllocateBelow(txid, count, db.rwtx.compactAllocLimit))
+	} else {
+		p.SetId(db.freelist.Allocate(txid, count))
+	}
 	if p.Id() != 0 {
 		return p, nil
+	}
+
+	// A relocation transaction must never extend the file; when no lower page
+	// is available the batch is retried with fewer pages.
+	if db.rwtx != nil && db.rwtx.compactAllocLimit != 0 {
+		return nil, errCompactNoSpace
 	}
 
 	// Resize mmap() if we're at the end.

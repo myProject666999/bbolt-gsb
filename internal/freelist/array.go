@@ -60,6 +60,45 @@ func (f *array) Allocate(txid common.Txid, n int) common.Pgid {
 	return 0
 }
 
+// AllocateBelow allocates a contiguous block of n pages whose highest used
+// page ID is strictly smaller than below. The array freelist keeps its free
+// IDs sorted, so the first fitting block is automatically the lowest one.
+func (f *array) AllocateBelow(txid common.Txid, n int, below common.Pgid) common.Pgid {
+	if n <= 0 || len(f.ids) == 0 || common.Pgid(n) > below {
+		return 0
+	}
+
+	// Linear scan over the sorted ids, tracking the current contiguous run.
+	runStart := f.ids[0]
+	runLen := 0
+	for i, id := range f.ids {
+		if id >= below {
+			break
+		}
+		if runLen > 0 && id == f.ids[i-1]+1 {
+			runLen++
+		} else {
+			runStart, runLen = id, 1
+		}
+		if runLen >= n && runStart+common.Pgid(n) <= below {
+			// Remove the n pages [runStart, runStart+n) from the run.
+			startIdx := i - n + 1
+			if startIdx+n == len(f.ids) {
+				f.ids = f.ids[:startIdx]
+			} else {
+				copy(f.ids[startIdx:], f.ids[startIdx+n:])
+				f.ids = f.ids[:len(f.ids)-n]
+			}
+			for j := common.Pgid(0); j < common.Pgid(n); j++ {
+				delete(f.cache, runStart+j)
+			}
+			f.allocs[runStart] = txid
+			return runStart
+		}
+	}
+	return 0
+}
+
 func (f *array) FreeCount() int {
 	return len(f.ids)
 }
@@ -96,6 +135,16 @@ func (f *array) mergeSpans(ids common.Pgids) {
 		}
 	})
 	f.ids = common.Pgids(f.ids).Merge(ids)
+}
+
+// DropAbove removes all available and pending free pages with an ID >= pgid.
+func (f *array) DropAbove(pgid common.Pgid) {
+	idx := sort.Search(len(f.ids), func(i int) bool { return f.ids[i] >= pgid })
+	for _, id := range f.ids[idx:] {
+		delete(f.cache, id)
+	}
+	f.ids = f.ids[:idx]
+	f.dropPendingAbove(pgid)
 }
 
 func NewArrayFreelist() Interface {

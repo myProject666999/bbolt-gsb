@@ -132,6 +132,44 @@ func (t *shared) RemoveReadonlyTXID(tid common.Txid) {
 	}
 }
 
+// ReadonlyTxIDs returns a sorted copy of all currently open read-only
+// transaction IDs.
+func (t *shared) ReadonlyTxIDs() []common.Txid {
+	ids := make([]common.Txid, len(t.readonlyTXIDs))
+	copy(ids, t.readonlyTXIDs)
+	sort.Sort(txIDx(ids))
+	return ids
+}
+
+// dropPendingAbove removes every pending page (and its overflow mapping bookkeeping)
+// with an ID >= pgid. It is shared by the array and hashmap freelist
+// implementations. Note that whole pending spans are not expected to straddle
+// the boundary because the boundary is a new high water mark and pages are
+// freed as contiguous blocks; individual overflow-chain IDs are filtered
+// defensively regardless.
+func (t *shared) dropPendingAbove(pgid common.Pgid) {
+	for txid, txp := range t.pending {
+		kept := 0
+		for i, id := range txp.ids {
+			if id >= pgid {
+				delete(t.cache, id)
+				if atx := txp.alloctx[i]; atx != 0 {
+					delete(t.allocs, id)
+				}
+				continue
+			}
+			txp.ids[kept] = id
+			txp.alloctx[kept] = txp.alloctx[i]
+			kept++
+		}
+		txp.ids = txp.ids[:kept]
+		txp.alloctx = txp.alloctx[:kept]
+		if len(txp.ids) == 0 {
+			delete(t.pending, txid)
+		}
+	}
+}
+
 type txIDx []common.Txid
 
 func (t txIDx) Len() int           { return len(t) }

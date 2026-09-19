@@ -27,6 +27,13 @@ type Interface interface {
 	// available; otherwise, it returns 0.
 	Allocate(txid common.Txid, numPages int) common.Pgid
 
+	// AllocateBelow behaves like Allocate but only returns a contiguous
+	// block of numPages free pages whose highest used page ID is strictly
+	// smaller than below. It is used by online incremental compaction to
+	// guarantee that a migrated page is placed at a lower page ID than the
+	// page it replaces. It returns 0 if no such block exists.
+	AllocateBelow(txid common.Txid, numPages int, below common.Pgid) common.Pgid
+
 	// Count returns the number of free and pending pages.
 	Count() int
 
@@ -54,6 +61,17 @@ type Interface interface {
 
 	// Rollback removes the pages from a given pending tx.
 	Rollback(txId common.Txid)
+
+	// DropAbove permanently removes from the freelist (both the available
+	// free pages and the pending pages) every page with an ID >= pgid. It is
+	// used when online incremental compaction lowers the database high
+	// water mark: the pages beyond the new high water mark are discarded
+	// together with the trailing file space instead of being reused.
+	DropAbove(pgid common.Pgid)
+
+	// ReadonlyTxIDs returns a sorted copy of the IDs of all currently open
+	// read-only transactions known to the freelist.
+	ReadonlyTxIDs() []common.Txid
 
 	// Copyall copies a list of all free ids and all pending ids in one sorted list.
 	// f.count returns the minimum length required for dst.

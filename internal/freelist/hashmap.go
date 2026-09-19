@@ -105,6 +105,48 @@ func (f *hashMap) Allocate(txid common.Txid, n int) common.Pgid {
 	return 0
 }
 
+// AllocateBelow allocates a contiguous block of n pages whose highest used
+// page ID is strictly smaller than below. Among all fitting spans the span
+// with the lowest starting page ID is chosen so that online incremental
+// compaction drains the file tail monotonically.
+func (f *hashMap) AllocateBelow(txid common.Txid, n int, below common.Pgid) common.Pgid {
+	if n == 0 {
+		return 0
+	}
+
+	var (
+		found  bool
+		best   common.Pgid
+		bestSz uint64
+	)
+	for start, size := range f.forwardMap {
+		if common.Pgid(size) < common.Pgid(n) || start+common.Pgid(n) >= below {
+			continue
+		}
+		if !found || start < best {
+			found, best, bestSz = true, start, size
+		}
+	}
+	if !found {
+		return 0
+	}
+
+	// Remove the chosen span and re-add its remainder (if any) below the
+	// allocated block.
+	f.delSpan(best, bestSz)
+	f.allocs[best] = txid
+
+	remain := bestSz - uint64(n)
+	if remain > 0 {
+		f.addSpan(best+common.Pgid(n), remain)
+	}
+
+	for i := common.Pgid(0); i < common.Pgid(n); i++ {
+		delete(f.cache, best+i)
+	}
+	return best
+}
+
 func (f *hashMap) FreeCount() int {
 	common.Verify(func() {
 		expectedFreePageCount := f.hashmapFreeCountSlow()
@@ -244,6 +286,31 @@ func (f *hashMap) mergeWithExistingSpan(start, end common.Pgid) {
 	}
 
 	f.addSpan(newStart, newSize)
+}
+
+// DropAbove removes all available and pending free pages with an ID >= pgid.
+func (f *hashMap) DropAbove(pgid common.Pgid) {
+	// Collect the starting page IDs of spans that intersect the discarded
+	// region and remove / shrink them.
+	for start, size := range f.forwardMap {
+		end := start + common.Pgid(size-1)
+		if end < pgid {
+			continue
+		}
+
+		f.delSpan(start, size)
+		if start < pgid {
+			// Keep the surviving prefix of the span.
+			f.addSpan(start, uint64(pgid-start))
+		}
+	}
+
+	// addSpan/delSpan do not maintain the shared lookup cache, and pending
+	// pages are tracked separately; drop the pending pages and rebuild the
+	// cache from the authoritative span maps below.
+	f.dropPendingAbove(pgid)
+
+	f.reindex()
 }
 
 // idsFromFreemaps get all free page IDs from f.freemaps.

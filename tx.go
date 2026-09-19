@@ -34,6 +34,12 @@ type Tx struct {
 	stats          TxStats
 	commitHandlers []func()
 
+	// compactAllocLimit, when non-zero, makes all freelist allocations of the
+	// transaction return pages strictly below this page ID. It is set by
+	// online incremental compaction relocation transactions so every moved
+	// page lands at a lower address than the page it replaces.
+	compactAllocLimit common.Pgid
+
 	// WriteFlag specifies the flag for write-related methods like WriteTo().
 	// Tx opens the database file with the specified flag to copy the data.
 	//

@@ -27,6 +27,7 @@ func NewRootCommand() *cobra.Command {
 		newBucketsCommand(),
 		newInfoCommand(),
 		newCompactCommand(),
+		newOnlineCompactCommand(),
 		newStatsCommand(),
 		newPagesCommand(),
 		newKeysCommand(),

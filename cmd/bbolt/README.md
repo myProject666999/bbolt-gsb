@@ -498,6 +498,41 @@ Example:
   ```bash
   $bbolt compact -o ~/db.compact ~/default.etcd/member/snap/db
   16805888 -> 32768 bytes (gain=512.88x)
+
+
+### online-compact
+
+Online-compact performs incremental compaction on a live database **in place**:
+it relocates the highest-address live pages into already-free lower pages using
+normal short-lived write transactions, lowers the high water mark and truncates
+the free file tail. The database keeps serving readers and writers the whole
+time; there is no full rewrite and no destination file. The offline
+`compact` command is unchanged.
+
+If long-lived read transactions are still open when the physical truncation is
+due, online-compact still relocates the pages but defers the truncation; rerun
+the command (or `DB.OnlineCompact`) once those readers close.
+
+Usage:
+```
+$ bbolt online-compact -h
+incrementally compacts a live database in place, relocating tail pages and shrinking the file without taking it offline.
+
+Usage:
+  bbolt online-compact [options] <bbolt-file> [flags]
+
+Flags:
+      --batch-pages int       maximum number of tail pages relocated per write transaction (default 64)
+  -h, --help                  help for online-compact
+      --shrink-timeout duration   max time to wait for long-lived read transactions before truncating the file tail (default 30s)
+```
+
+Example:
+
+  ```bash
+  $bbolt online-compact ~/default.etcd/member/snap/db
+  batches=42 moved-pages=4010 hwm=682->76 16805888 -> 311296 bytes (gain=53.99x) shrunk=true
+  ```
   ```
 
   - It will create a compacted database file: `db.compact` at given path.
